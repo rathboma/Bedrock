@@ -12,6 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       zlib1g-dev \
       git \
       ca-certificates \
+      python3 \
+      python-is-python3 \
+      python3-jsonschema \
+      python3-jinja2 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CC=clang-18 \
