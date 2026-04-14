@@ -1,0 +1,103 @@
+name: Publish Bedrock Docker Image
+
+on:
+  schedule:
+    - cron: '0 7 * * *'  # Daily at 07:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: docker-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # push newly-synced upstream tags to the fork
+
+jobs:
+  publish:
+    name: Build newest upstream tag
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync tags from upstream (Expensify/Bedrock)
+        run: |
+          git remote add upstream https://github.com/Expensify/Bedrock.git || \
+            git remote set-url upstream https://github.com/Expensify/Bedrock.git
+          git fetch upstream --tags --prune --prune-tags
+          # Push any new tags to the fork so they're visible on github.com/rathboma/Bedrock
+          git push origin --tags
+
+      - name: Resolve newest upstream tag
+        id: tag
+        run: |
+          TAG=$(git for-each-ref --sort=-creatordate --format '%(refname:short)' --count=1 'refs/tags/')
+          if [ -z "$TAG" ]; then
+            echo "No tags found; aborting." >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Newest upstream tag: ${TAG}"
+
+      - name: Check Docker Hub for existing image
+        id: exists
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if docker manifest inspect "rathboma/bedrock:${TAG}" >/dev/null 2>&1; then
+            echo "already_built=true" >> "$GITHUB_OUTPUT"
+            echo "rathboma/bedrock:${TAG} already exists on Docker Hub — skipping build."
+          else
+            echo "already_built=false" >> "$GITHUB_OUTPUT"
+            echo "rathboma/bedrock:${TAG} is new — will build."
+          fi
+
+      - name: Check out the tag (with submodules)
+        if: steps.exists.outputs.already_built == 'false'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git checkout --detach "${TAG}"
+          git submodule update --init --recursive
+
+      - name: Set up Docker Buildx
+        if: steps.exists.outputs.already_built == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: steps.exists.outputs.already_built == 'false'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        if: steps.exists.outputs.already_built == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            rathboma/bedrock:${{ steps.tag.outputs.tag }}
+            rathboma/bedrock:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        if: always()
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          SKIPPED: ${{ steps.exists.outputs.already_built }}
+        run: |
+          {
+            echo "## Bedrock Docker publish"
+            echo ""
+            echo "- **Tag:** \`${TAG}\`"
+            if [ "${SKIPPED}" = "true" ]; then
+              echo "- **Result:** skipped (already on Docker Hub)"
+            else
+              echo "- **Result:** built and pushed \`rathboma/bedrock:${TAG}\` + \`:latest\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
