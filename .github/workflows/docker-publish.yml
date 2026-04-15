@@ -17,21 +17,17 @@ jobs:
     name: Build newest upstream tag
     runs-on: ubuntu-24.04
     steps:
-      - name: Resolve newest upstream tag
+      - name: Resolve newest upstream release with a `bedrock` asset
         id: tag
         run: |
-          # Date-style tags only (YYYY-MM-DD); ignores composite/test tags.
-          TAG=$(git ls-remote --tags --refs https://github.com/Expensify/Bedrock.git \
-                | awk -F'refs/tags/' '{print $2}' \
-                | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
-                | sort -r \
-                | head -n 1)
-          if [ -z "$TAG" ]; then
-            echo "No date-style tags found on Expensify/Bedrock." >&2
+          TAG=$(curl -fsSL "https://api.github.com/repos/Expensify/Bedrock/releases?per_page=20" \
+                | jq -r '[.[] | select(.draft==false and .prerelease==false and (.assets | any(.name=="bedrock")))] | .[0].tag_name')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "No published release with a bedrock asset found." >&2
             exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Newest upstream tag: ${TAG}"
+          echo "Newest release with bedrock asset: ${TAG}"
 
       - name: Check Docker Hub for existing image
         id: exists
@@ -46,28 +42,11 @@ jobs:
             echo "rathboma/bedrock:${TAG} is new — will build."
           fi
 
-      - name: Check out the tag (with submodules)
+      - name: Checkout Dockerfile
         if: steps.exists.outputs.already_built == 'false'
         uses: actions/checkout@v4
         with:
-          repository: Expensify/Bedrock
-          ref: ${{ steps.tag.outputs.tag }}
-          submodules: recursive
           fetch-depth: 1
-
-      - name: Copy Dockerfile from this repo
-        if: steps.exists.outputs.already_built == 'false'
-        uses: actions/checkout@v4
-        with:
-          path: __fork
-          sparse-checkout: |
-            Dockerfile
-          sparse-checkout-cone-mode: false
-          fetch-depth: 1
-
-      - name: Stage Dockerfile at build context root
-        if: steps.exists.outputs.already_built == 'false'
-        run: cp __fork/Dockerfile ./Dockerfile
 
       - name: Set up Docker Buildx
         if: steps.exists.outputs.already_built == 'false'
@@ -86,6 +65,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            BEDROCK_VERSION=${{ steps.tag.outputs.tag }}
           tags: |
             rathboma/bedrock:${{ steps.tag.outputs.tag }}
             rathboma/bedrock:latest
