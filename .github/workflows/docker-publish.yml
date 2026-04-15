@@ -10,32 +10,24 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write  # push newly-synced upstream tags to the fork
+  contents: read
 
 jobs:
   publish:
     name: Build newest upstream tag
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout fork
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Sync tags from upstream (Expensify/Bedrock)
-        run: |
-          git remote add upstream https://github.com/Expensify/Bedrock.git || \
-            git remote set-url upstream https://github.com/Expensify/Bedrock.git
-          git fetch upstream --tags --prune --prune-tags
-          # Push any new tags to the fork so they're visible on github.com/rathboma/Bedrock
-          git push origin --tags
-
       - name: Resolve newest upstream tag
         id: tag
         run: |
-          TAG=$(git for-each-ref --sort=-creatordate --format '%(refname:short)' --count=1 'refs/tags/')
+          # Date-style tags only (YYYY-MM-DD); ignores composite/test tags.
+          TAG=$(git ls-remote --tags --refs https://github.com/Expensify/Bedrock.git \
+                | awk -F'refs/tags/' '{print $2}' \
+                | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+                | sort -r \
+                | head -n 1)
           if [ -z "$TAG" ]; then
-            echo "No tags found; aborting." >&2
+            echo "No date-style tags found on Expensify/Bedrock." >&2
             exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
@@ -56,11 +48,26 @@ jobs:
 
       - name: Check out the tag (with submodules)
         if: steps.exists.outputs.already_built == 'false'
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          git checkout --detach "${TAG}"
-          git submodule update --init --recursive
+        uses: actions/checkout@v4
+        with:
+          repository: Expensify/Bedrock
+          ref: ${{ steps.tag.outputs.tag }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Copy Dockerfile from this repo
+        if: steps.exists.outputs.already_built == 'false'
+        uses: actions/checkout@v4
+        with:
+          path: __fork
+          sparse-checkout: |
+            Dockerfile
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
+      - name: Stage Dockerfile at build context root
+        if: steps.exists.outputs.already_built == 'false'
+        run: cp __fork/Dockerfile ./Dockerfile
 
       - name: Set up Docker Buildx
         if: steps.exists.outputs.already_built == 'false'
